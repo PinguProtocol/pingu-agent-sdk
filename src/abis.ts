@@ -26,7 +26,9 @@ export const ORDER_STORE_ABI = [
 
 export const POSITIONS_ABI = [
   "function addMargin(address asset, string market, uint256 margin) payable",
-  "function removeMargin(address asset, string market, uint256 margin, bytes[] priceUpdateData) payable",
+  "function removeMargin(address asset, string market, uint256 margin, bytes[] priceUpdateData)",
+  "function closePositionWithoutProfit(address _asset, string calldata _market, bytes[] calldata priceUpdateData)",
+  "function getPnL(address asset, string market, bool isLong, uint256 price, uint256 positionPrice, uint256 size, int256 fundingTracker) view returns (int256 pnl, int256 fundingFee)",
 ];
 
 export const POSITION_STORE_ABI = [
@@ -38,8 +40,8 @@ export const POSITION_STORE_ABI = [
 
 export const MARKET_STORE_ABI = [
   "function getMarketList() view returns (string[])",
-  "function get(string _market) view returns (tuple(string name, string category, address chainlinkFeed, uint256 maxLeverage, uint256 maxDeviation, uint256 fee, uint256 liqThreshold, uint256 fundingFactor, uint256 minOrderAge, uint256 pythMaxAge, bytes32 pythFeed, bool allowChainlinkExecution, bool isReduceOnly))",
-  "function getMany(string[] _markets) view returns (tuple(string name, string category, address chainlinkFeed, uint256 maxLeverage, uint256 maxDeviation, uint256 fee, uint256 liqThreshold, uint256 fundingFactor, uint256 minOrderAge, uint256 pythMaxAge, bytes32 pythFeed, bool allowChainlinkExecution, bool isReduceOnly)[])",
+  "function get(string _market) view returns (tuple(string name, string category, address chainlinkFeed, uint256 maxLeverage, uint256 maxDeviation, uint256 fee, uint256 liqThreshold, uint256 fundingFactor, uint256 minOrderAge, uint256 pythMaxAge, bytes32 pythFeed, bool allowChainlinkExecution, bool isReduceOnly, uint256 minFactor, uint256 sampleSize))",
+  "function getMany(string[] _markets) view returns (tuple(string name, string category, address chainlinkFeed, uint256 maxLeverage, uint256 maxDeviation, uint256 fee, uint256 liqThreshold, uint256 fundingFactor, uint256 minOrderAge, uint256 pythMaxAge, bytes32 pythFeed, bool allowChainlinkExecution, bool isReduceOnly, uint256 minFactor, uint256 sampleSize)[])",
 ];
 
 export const POOL_ABI = [
@@ -72,5 +74,5 @@ export const FUNDING_STORE_ABI = [
 
 export const FUNDING_ABI = [
   "function getRealTimeFundingTracker(address asset, string market) view returns (int256)",
-  "function getAccruedFunding(address asset, string market, uint256 size, int256 fundingTracker) view returns (int256)",
+  "function getAccruedFundingV2(address asset, string market, uint256 intervals) view returns (int256, int256, int256, int256)",
 ];

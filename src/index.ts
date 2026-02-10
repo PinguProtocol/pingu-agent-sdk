@@ -48,4 +48,5 @@ export {
   getAssetNameByAddress,
   getAssetDecimalsByAddress,
   isGasToken,
+  parseContractError,
 } from "./utils";

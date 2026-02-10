@@ -11,10 +11,10 @@ interface FundingSnapshot {
   category: string;
 }
 
-async function scanFundingRates(): Promise<FundingSnapshot[]> {
-  const client = new PinguClient();
-  const reader = new PinguReader(client);
+const client = new PinguClient();
+const reader = new PinguReader(client);
 
+async function scanFundingRates(): Promise<FundingSnapshot[]> {
   const markets = await reader.getMarkets();
   console.log(`Scanning ${markets.length} markets...\n`);
 

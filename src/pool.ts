@@ -8,6 +8,7 @@ import {
   getAssetDecimals,
   isGasToken,
   addGasBuffer,
+  parseContractError,
 } from "./utils";
 
 export class PinguPool {
@@ -55,7 +56,7 @@ export class PinguPool {
 
       return tx.wait();
     } catch (error) {
-      throw new Error(`Failed to deposit: ${(error as Error).message}`);
+      throw new Error(`Failed to deposit: ${parseContractError(error)}`);
     }
   }
 
@@ -78,7 +79,7 @@ export class PinguPool {
 
       return tx.wait();
     } catch (error) {
-      throw new Error(`Failed to withdraw: ${(error as Error).message}`);
+      throw new Error(`Failed to withdraw: ${parseContractError(error)}`);
     }
   }
 
@@ -99,7 +100,7 @@ export class PinguPool {
 
       return Math.round(Number(taxBps.toString())) / 100;
     } catch (error) {
-      throw new Error(`Failed to get deposit tax: ${(error as Error).message}`);
+      throw new Error(`Failed to get deposit tax: ${parseContractError(error)}`);
     }
   }
 
@@ -117,7 +118,7 @@ export class PinguPool {
       return Math.round(Number(taxBps.toString())) / 100;
     } catch (error) {
       throw new Error(
-        `Failed to get withdrawal tax: ${(error as Error).message}`,
+        `Failed to get withdrawal tax: ${parseContractError(error)}`,
       );
     }
   }
@@ -169,8 +170,47 @@ export class PinguPool {
       };
     } catch (error) {
       throw new Error(
-        `Failed to get user balance: ${(error as Error).message}`,
+        `Failed to get user balance: ${parseContractError(error)}`,
       );
+    }
+  }
+
+  /**
+   * Approve asset spending for the FundStore contract (used by Pool).
+   * FundStore is the contract that performs `transferFrom` for pool deposits.
+   * This approval also covers trading operations (Orders, Positions).
+   *
+   * @param asset - Asset name (default "USDC")
+   * @param amount - Amount to approve (default: MaxUint256 for unlimited)
+   */
+  async approveAsset(
+    asset = "USDC",
+    amount?: ethers.BigNumber,
+  ): Promise<ethers.providers.TransactionReceipt> {
+    this.requireSigner();
+
+    const assetAddress = getAssetAddress(asset, this.client.config.assets);
+
+    if (isGasToken(asset, this.client.config.assets)) {
+      throw new Error("Cannot approve gas token");
+    }
+
+    try {
+      const fundStoreAddress =
+        await this.client.getContractAddress("FundStore");
+      const erc20 = this.client.getErc20Contract(assetAddress, true);
+
+      const approveAmount = amount || ethers.constants.MaxUint256;
+      const gas = await erc20.estimateGas.approve(
+        fundStoreAddress,
+        approveAmount,
+      );
+      const tx = await erc20.approve(fundStoreAddress, approveAmount, {
+        gasLimit: addGasBuffer(gas),
+      });
+      return tx.wait();
+    } catch (error) {
+      throw new Error(`Failed to approve asset: ${parseContractError(error)}`);
     }
   }
 }

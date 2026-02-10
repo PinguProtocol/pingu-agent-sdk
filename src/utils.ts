@@ -122,6 +122,8 @@ export function formatMarketInfo(rawMarketInfo: {
   pythFeed: string;
   allowChainlinkExecution: boolean;
   isReduceOnly: boolean;
+  minFactor: ethers.BigNumberish;
+  sampleSize: ethers.BigNumberish;
 }): MarketInfo {
   return {
     market: rawMarketInfo.market,
@@ -141,7 +143,80 @@ export function formatMarketInfo(rawMarketInfo: {
     pythFeed: rawMarketInfo.pythFeed,
     allowChainlinkExecution: rawMarketInfo.allowChainlinkExecution,
     isReduceOnly: rawMarketInfo.isReduceOnly,
+    minFactor: Number(rawMarketInfo.minFactor),
+    sampleSize: Number(rawMarketInfo.sampleSize),
   };
+}
+
+/**
+ * Map of Solidity revert reason codes to human-readable error messages
+ */
+const REVERT_MESSAGES: Record<string, string> = {
+  "!paused": "New orders are currently paused",
+  "!order-type": "Invalid order type (must be 0=market, 1=limit, 2=stop)",
+  "!price": "Price must be > 0 for limit/stop orders",
+  "!asset-exists": "Asset is not supported by the protocol",
+  "!min-size": "Order size is below minimum for this asset",
+  "!market-exists": "Market does not exist",
+  "!expiry-value": "Order expiry must be in the future",
+  "!max-expiry": "Order expiry exceeds maximum TTL",
+  "!user-oco": "Cannot cancel another user's order",
+  "!market-reduce-only": "This market only accepts reduce-only orders",
+  "!margin": "Invalid margin amount",
+  "!min-leverage": "Leverage is below minimum (1x)",
+  "!max-leverage": "Leverage exceeds the maximum allowed for this market",
+  "!order": "Order does not exist",
+  "!user": "Not the order owner",
+  "!max-oi": "Maximum open interest reached for this market",
+  "!max-delta": "Maximum long/short delta reached for this market",
+  "!position": "No position found for this user/asset/market",
+  "!pnl-positive": "Position must be in profit to use closePositionWithoutProfit",
+  "!max-age": "Pyth price data is too old, try again",
+  "!upl": "Unrealized loss too high to remove this much margin",
+  "!pool-risk": "Pool drawdown limit reached",
+  "!max-position-size": "Maximum position size reached",
+  "!asset": "Asset is not supported",
+  "!amount": "Amount must be greater than 0",
+  "!tax": "Deposit/withdrawal tax too high, operation blocked",
+  "!empty": "Pool is empty",
+  "!locked-amount": "Insufficient unlocked balance for withdrawal",
+  "!payout-period": "Buffer payout period not configured",
+  "!pool-balance": "Insufficient pool balance",
+  "!tp-invalid": "Take profit price is invalid for this direction",
+  "!sl-invalid": "Stop loss price is invalid for this direction",
+  "!tpsl-invalid": "TP and SL prices are invalid relative to each other",
+  "!unauthorized": "Unauthorized caller",
+};
+
+/**
+ * Parse a contract error and return a human-readable message.
+ * Maps Solidity revert reasons (e.g. "!margin") to clear descriptions.
+ */
+export function parseContractError(error: unknown): string {
+  const err = error as Record<string, unknown>;
+  const raw =
+    (err?.error as Record<string, unknown>)?.reason as string ||
+    (err?.reason as string) ||
+    (err?.message as string) ||
+    String(error);
+
+  // Try to extract the revert reason code from "execution reverted: !xxx"
+  const revertMatch = raw.match(/execution reverted:\s*(.+)/i);
+  if (revertMatch) {
+    const code = revertMatch[1].trim().replace(/^'|'$/g, "");
+    const mapped = REVERT_MESSAGES[code];
+    if (mapped) return `${mapped} (${code})`;
+    return code;
+  }
+
+  // Try to find a known "!xxx" code anywhere in the message
+  for (const [code, msg] of Object.entries(REVERT_MESSAGES)) {
+    if (raw.includes(code)) {
+      return `${msg} (${code})`;
+    }
+  }
+
+  return raw;
 }
 
 export function getAssetAddress(

@@ -7,7 +7,7 @@ export interface Position {
   isLong: boolean;
   size: number;
   margin: number;
-  fundingTracker: string;
+  fundingTracker: ethers.BigNumber;
   price: number;
   timestamp: number;
   leverage: number;
@@ -46,6 +46,8 @@ export interface MarketInfo {
   pythFeed: string;
   allowChainlinkExecution: boolean;
   isReduceOnly: boolean;
+  minFactor: number;
+  sampleSize: number;
 }
 
 export interface OIData {
@@ -94,6 +96,8 @@ export interface SubmitOrderParams {
   margin: number;
   leverage: number;
   asset?: string;
+  tpPrice?: number;
+  slPrice?: number;
 }
 
 export interface SubmitLimitOrderParams extends SubmitOrderParams {

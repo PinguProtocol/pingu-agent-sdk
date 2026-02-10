@@ -18,6 +18,7 @@ import {
   isGasToken,
   addGasBuffer,
   calculateLeverage,
+  parseContractError,
 } from "./utils";
 
 // Pyth Hermes endpoint for price updates
@@ -69,6 +70,67 @@ export class PinguTrader {
     }
   }
 
+  /**
+   * Compute position size from margin and leverage, capped to maxLeverage.
+   *
+   * 1. Caps leverage to maxLeverage so the user can never exceed it.
+   * 2. Uses floor rounding (10-decimal precision) so the effective leverage
+   *    is always ≤ the desired value.
+   * 3. Double-checks with the exact on-chain formula:
+   *      onChainLeverage = UNIT × size / margin
+   *    If it still exceeds maxLeverage × UNIT (e.g. due to edge-case rounding),
+   *    size is reduced by 1 wei — negligible but prevents a revert.
+   *
+   * @param margin - Margin amount as BigNumber (in asset decimals)
+   * @param leverage - Desired leverage (e.g. 2.25)
+   * @param maxLeverage - Market's maximum leverage (integer, from MarketStore)
+   * @returns size as BigNumber
+   */
+  private computeSize(
+    margin: ethers.BigNumber,
+    leverage: number,
+    maxLeverage: number,
+  ): ethers.BigNumber {
+    // 1. Cap leverage to maxLeverage
+    const cappedLeverage = Math.min(leverage, maxLeverage);
+
+    // 2. Floor to 10 decimals to avoid floating-point overflows
+    const SCALE = 10_000_000_000;
+    const leverageScaled = Math.floor(cappedLeverage * SCALE);
+    let size = margin.mul(leverageScaled).div(SCALE);
+
+    // 3. Safety: reproduce the exact on-chain leverage check
+    //    Contract: leverage = (UNIT * size) / margin
+    //              require(leverage <= maxLeverage * UNIT, "!max-leverage")
+    if (!margin.isZero() && !size.isZero()) {
+      const UNIT = ethers.constants.WeiPerEther;
+      const maxLevBN = ethers.BigNumber.from(maxLeverage).mul(UNIT);
+      const onChainLev = UNIT.mul(size).div(margin);
+
+      if (onChainLev.gt(maxLevBN)) {
+        // Hard cap: size = margin × maxLeverage
+        size = margin.mul(maxLeverage);
+
+        // Final safety: if integer division still overflows, subtract 1 wei
+        const recheck = UNIT.mul(size).div(margin);
+        if (recheck.gt(maxLevBN)) {
+          size = size.sub(1);
+        }
+      }
+    }
+
+    return size;
+  }
+
+  /**
+   * Submit a market order (orderType = 0).
+   * Optionally attach take-profit and/or stop-loss orders in the same transaction.
+   *
+   * When `tpPrice` / `slPrice` are provided, additional reduce-only orders are
+   * submitted alongside the main order via `submitSimpleOrders`. These TP/SL
+   * orders are independent and will NOT auto-cancel each other (unlike the
+   * contract's `submitOrder` which links them via cancelOrderId).
+   */
   async submitMarketOrder(
     params: SubmitOrderParams,
   ): Promise<ethers.providers.TransactionReceipt> {
@@ -78,10 +140,15 @@ export class PinguTrader {
     const assetAddress = getAssetAddress(asset, this.client.config.assets);
     const assetDecimals = getAssetDecimals(asset, this.client.config.assets);
 
-    // Parse margin as BigNumber
+    // Fetch market maxLeverage to cap size and prevent revert
+    const marketStore = await this.client.getContract("MarketStore");
+    const marketInfo = (await this.client.withFallback(() =>
+      marketStore.get(params.market),
+    )) as { maxLeverage: ethers.BigNumber; fee: ethers.BigNumber };
+    const maxLeverage = Number(marketInfo.maxLeverage);
+
     const _margin = parseUnits(params.margin.toString(), assetDecimals);
-    // Calculate size = margin * leverage using BigNumber
-    const _size = _margin.mul(Math.floor(params.leverage));
+    const _size = this.computeSize(_margin, params.leverage, maxLeverage);
 
     const orderTuple = createOrderTuple({
       market: params.market,
@@ -94,19 +161,55 @@ export class PinguTrader {
       isReduceOnly: false,
     });
 
+    // Build array of orders (main + optional TP/SL)
+    const orders = [orderTuple];
+
+    if (params.tpPrice) {
+      orders.push(
+        createOrderTuple({
+          market: params.market,
+          asset: assetAddress,
+          isLong: !params.isLong,
+          margin: ethers.BigNumber.from(0),
+          size: _size,
+          price: parseUnits(params.tpPrice.toString(), 18),
+          orderType: 1, // limit
+          isReduceOnly: true,
+        }),
+      );
+    }
+
+    if (params.slPrice) {
+      orders.push(
+        createOrderTuple({
+          market: params.market,
+          asset: assetAddress,
+          isLong: !params.isLong,
+          margin: ethers.BigNumber.from(0),
+          size: _size,
+          price: parseUnits(params.slPrice.toString(), 18),
+          orderType: 2, // stop
+          isReduceOnly: true,
+        }),
+      );
+    }
+
     let value = ethers.BigNumber.from(0);
     if (isGasToken(asset, this.client.config.assets)) {
-      value = _margin;
+      // Gas token: msg.value must cover margin + fee (TP/SL are reduce-only, no fee upfront)
+      // Fee computed without referral discount — any excess is refunded by the contract
+      const fee = _size.mul(marketInfo.fee).div(10000);
+      value = _margin.add(fee);
     }
 
     try {
       const contract = await this.client.getContract("Orders", true);
       const gas = await contract.estimateGas.submitSimpleOrders(
-        [orderTuple],
+        orders,
         [],
         { value },
       );
-      const tx = await contract.submitSimpleOrders([orderTuple], [], {
+      const tx = await contract.submitSimpleOrders(orders, [], {
         value,
         gasLimit: addGasBuffer(gas),
       });
@@ -114,11 +217,18 @@ export class PinguTrader {
       return tx.wait();
     } catch (error) {
       throw new Error(
-        `Failed to submit market order: ${(error as Error).message}`,
+        `Failed to submit market order: ${parseContractError(error)}`,
       );
     }
   }
 
+  /**
+   * Submit a limit order (orderType = 1).
+   * Optionally attach take-profit and/or stop-loss orders in the same transaction.
+   *
+   * When `tpPrice` / `slPrice` are provided, additional reduce-only orders are
+   * submitted alongside the main order via `submitSimpleOrders`.
+   */
   async submitLimitOrder(
     params: SubmitLimitOrderParams,
   ): Promise<ethers.providers.TransactionReceipt> {
@@ -128,14 +238,16 @@ export class PinguTrader {
     const assetAddress = getAssetAddress(asset, this.client.config.assets);
     const assetDecimals = getAssetDecimals(asset, this.client.config.assets);
 
-    // Parse margin as BigNumber
-    const _margin = parseUnits(params.margin.toString(), assetDecimals);
-    // Calculate size = margin * leverage using BigNumber
-    const _size = _margin.mul(Math.floor(params.leverage));
-    const _price = parseUnits(params.price.toString(), 18);
+    // Fetch market maxLeverage to cap size and prevent revert
+    const marketStore = await this.client.getContract("MarketStore");
+    const marketInfo = (await this.client.withFallback(() =>
+      marketStore.get(params.market),
+    )) as { maxLeverage: ethers.BigNumber; fee: ethers.BigNumber };
+    const maxLeverage = Number(marketInfo.maxLeverage);
 
-    // orderType: 1 = limit, 2 = stop
-    const orderType = 1;
+    const _margin = parseUnits(params.margin.toString(), assetDecimals);
+    const _size = this.computeSize(_margin, params.leverage, maxLeverage);
+    const _price = parseUnits(params.price.toString(), 18);
 
     const orderTuple = createOrderTuple({
       market: params.market,
@@ -144,23 +256,59 @@ export class PinguTrader {
       margin: _margin,
       size: _size,
       price: _price,
-      orderType,
+      orderType: 1,
       isReduceOnly: false,
     });
 
+    // Build array of orders (main + optional TP/SL)
+    const orders = [orderTuple];
+
+    if (params.tpPrice) {
+      orders.push(
+        createOrderTuple({
+          market: params.market,
+          asset: assetAddress,
+          isLong: !params.isLong,
+          margin: ethers.BigNumber.from(0),
+          size: _size,
+          price: parseUnits(params.tpPrice.toString(), 18),
+          orderType: 1, // limit
+          isReduceOnly: true,
+        }),
+      );
+    }
+
+    if (params.slPrice) {
+      orders.push(
+        createOrderTuple({
+          market: params.market,
+          asset: assetAddress,
+          isLong: !params.isLong,
+          margin: ethers.BigNumber.from(0),
+          size: _size,
+          price: parseUnits(params.slPrice.toString(), 18),
+          orderType: 2, // stop
+          isReduceOnly: true,
+        }),
+      );
+    }
+
     let value = ethers.BigNumber.from(0);
     if (isGasToken(asset, this.client.config.assets)) {
-      value = _margin;
+      // Gas token: msg.value must cover margin + fee (TP/SL are reduce-only, no fee upfront)
+      // Fee computed without referral discount — any excess is refunded by the contract
+      const fee = _size.mul(marketInfo.fee).div(10000);
+      value = _margin.add(fee);
     }
 
     try {
       const contract = await this.client.getContract("Orders", true);
       const gas = await contract.estimateGas.submitSimpleOrders(
-        [orderTuple],
+        orders,
         [],
         { value },
       );
-      const tx = await contract.submitSimpleOrders([orderTuple], [], {
+      const tx = await contract.submitSimpleOrders(orders, [], {
         value,
         gasLimit: addGasBuffer(gas),
       });
@@ -168,7 +316,7 @@ export class PinguTrader {
       return tx.wait();
     } catch (error) {
       throw new Error(
-        `Failed to submit limit order: ${(error as Error).message}`,
+        `Failed to submit limit order: ${parseContractError(error)}`,
       );
     }
   }
@@ -224,7 +372,7 @@ export class PinguTrader {
       return tx.wait();
     } catch (error) {
       throw new Error(
-        `Failed to close position: ${(error as Error).message}`,
+        `Failed to close position: ${parseContractError(error)}`,
       );
     }
   }
@@ -243,7 +391,7 @@ export class PinguTrader {
 
       return tx.wait();
     } catch (error) {
-      throw new Error(`Failed to cancel order: ${(error as Error).message}`);
+      throw new Error(`Failed to cancel order: ${parseContractError(error)}`);
     }
   }
 
@@ -261,7 +409,7 @@ export class PinguTrader {
 
       return tx.wait();
     } catch (error) {
-      throw new Error(`Failed to cancel orders: ${(error as Error).message}`);
+      throw new Error(`Failed to cancel orders: ${parseContractError(error)}`);
     }
   }
 
@@ -296,13 +444,23 @@ export class PinguTrader {
 
       return tx.wait();
     } catch (error) {
-      throw new Error(`Failed to add margin: ${(error as Error).message}`);
+      throw new Error(`Failed to add margin: ${parseContractError(error)}`);
     }
   }
 
   /**
-   * Remove margin from a position
-   * Requires Pyth price update data
+   * Remove margin from a position to increase its leverage.
+   *
+   * Constraints:
+   * - You cannot remove all the margin (remaining margin must be > 0).
+   * - The resulting leverage after removal must not exceed the market's maxLeverage.
+   * - If the position has an unrealized loss, there is a buffer check that may
+   *   prevent removal if the loss is too large relative to remaining margin.
+   * - Requires a Pyth price update (fetched automatically from Hermes).
+   *
+   * @param market - Market identifier (e.g. "ETH-USD")
+   * @param amount - Amount of margin to remove (human-readable, e.g. 50 for 50 USDC)
+   * @param asset - Asset name (default "USDC")
    */
   async removeMargin(
     market: string,
@@ -330,7 +488,6 @@ export class PinguTrader {
         market,
         margin,
         priceUpdateData,
-        { value: 1 }, // Pyth update fee
       );
       const tx = await contract.removeMargin(
         assetAddress,
@@ -338,14 +495,69 @@ export class PinguTrader {
         margin,
         priceUpdateData,
         {
-          value: 1,
           gasLimit: addGasBuffer(gas),
         },
       );
 
       return tx.wait();
     } catch (error) {
-      throw new Error(`Failed to remove margin: ${(error as Error).message}`);
+      throw new Error(`Failed to remove margin: ${parseContractError(error)}`);
+    }
+  }
+
+  /**
+   * Close a position without taking profit (black swan / emergency function).
+   *
+   * This function allows a user to retrieve their margin from a PROFITABLE
+   * position without claiming the profit. It is designed for extreme scenarios
+   * where the pool may not have enough liquidity to pay out profits.
+   *
+   * Important constraints:
+   * - The position MUST be in profit (pnl >= 0), otherwise the tx reverts with "!pnl-positive".
+   * - The profit is forfeited — only the original margin is returned.
+   * - The entire position is closed (no partial close).
+   * - Requires a Pyth price update (fetched automatically from Hermes).
+   *
+   * @param market - Market identifier (e.g. "ETH-USD")
+   * @param asset - Asset name (default "USDC")
+   */
+  async closePositionWithoutProfit(
+    market: string,
+    asset = "USDC",
+  ): Promise<ethers.providers.TransactionReceipt> {
+    this.requireSigner();
+
+    const assetAddress = getAssetAddress(asset, this.client.config.assets);
+
+    // Get market info for Pyth feed
+    const marketStore = await this.client.getContract("MarketStore");
+    const marketInfo = await marketStore.get(market);
+    const pythFeed = marketInfo.pythFeed;
+
+    // Fetch price update from Pyth Hermes
+    const priceUpdateData = await this.fetchPythPriceUpdate(pythFeed);
+
+    try {
+      const contract = await this.client.getContract("Positions", true);
+      const gas = await contract.estimateGas.closePositionWithoutProfit(
+        assetAddress,
+        market,
+        priceUpdateData,
+      );
+      const tx = await contract.closePositionWithoutProfit(
+        assetAddress,
+        market,
+        priceUpdateData,
+        {
+          gasLimit: addGasBuffer(gas),
+        },
+      );
+
+      return tx.wait();
+    } catch (error) {
+      throw new Error(
+        `Failed to close position without profit: ${parseContractError(error)}`,
+      );
     }
   }
 
@@ -404,7 +616,7 @@ export class PinguTrader {
           timestamp: p.timestamp,
         }));
     } catch (error) {
-      throw new Error(`Failed to get positions: ${(error as Error).message}`);
+      throw new Error(`Failed to get positions: ${parseContractError(error)}`);
     }
   }
 
@@ -431,14 +643,14 @@ export class PinguTrader {
             isLong: p.isLong,
             size: Number(formatUnits(p.size, decimals)),
             margin: Number(formatUnits(p.margin, decimals)),
-            fundingTracker: p.fundingTracker.toString(),
+            fundingTracker: p.fundingTracker,
             price: Number(formatUnits(p.price, 18)),
             timestamp: Number(p.timestamp),
             leverage: calculateLeverage(p.size, p.margin),
           };
         });
     } catch (error) {
-      throw new Error(`Failed to get positions: ${(error as Error).message}`);
+      throw new Error(`Failed to get positions: ${parseContractError(error)}`);
     }
   }
 
@@ -475,7 +687,7 @@ export class PinguTrader {
         };
       });
     } catch (error) {
-      throw new Error(`Failed to get orders: ${(error as Error).message}`);
+      throw new Error(`Failed to get orders: ${parseContractError(error)}`);
     }
   }
 
@@ -498,7 +710,7 @@ export class PinguTrader {
       )) as ethers.BigNumber;
       return Number(formatUnits(balance, assetDecimals));
     } catch (error) {
-      throw new Error(`Failed to get balance: ${(error as Error).message}`);
+      throw new Error(`Failed to get balance: ${parseContractError(error)}`);
     }
   }
 
@@ -512,19 +724,22 @@ export class PinguTrader {
     }
 
     try {
-      const ordersAddress = await this.client.getContractAddress("Orders");
+      const fundStoreAddress =
+        await this.client.getContractAddress("FundStore");
       const erc20 = this.client.getErc20Contract(assetAddress);
       const allowance = (await this.client.withFallback(() =>
-        erc20.allowance(userAddress, ordersAddress),
+        erc20.allowance(userAddress, fundStoreAddress),
       )) as ethers.BigNumber;
       return Number(formatUnits(allowance, assetDecimals));
     } catch (error) {
-      throw new Error(`Failed to get allowance: ${(error as Error).message}`);
+      throw new Error(`Failed to get allowance: ${parseContractError(error)}`);
     }
   }
 
   /**
-   * Approve asset spending for Orders contract
+   * Approve asset spending for the FundStore contract.
+   * FundStore is the contract that performs `transferFrom` on behalf of
+   * Orders, Positions, and Pool contracts.
    */
   async approveAsset(
     asset = "USDC",
@@ -539,17 +754,21 @@ export class PinguTrader {
     }
 
     try {
-      const ordersAddress = await this.client.getContractAddress("Orders");
+      const fundStoreAddress =
+        await this.client.getContractAddress("FundStore");
       const erc20 = this.client.getErc20Contract(assetAddress, true);
 
       const approveAmount = amount || ethers.constants.MaxUint256;
-      const gas = await erc20.estimateGas.approve(ordersAddress, approveAmount);
-      const tx = await erc20.approve(ordersAddress, approveAmount, {
+      const gas = await erc20.estimateGas.approve(
+        fundStoreAddress,
+        approveAmount,
+      );
+      const tx = await erc20.approve(fundStoreAddress, approveAmount, {
         gasLimit: addGasBuffer(gas),
       });
       return tx.wait();
     } catch (error) {
-      throw new Error(`Failed to approve asset: ${(error as Error).message}`);
+      throw new Error(`Failed to approve asset: ${parseContractError(error)}`);
     }
   }
 

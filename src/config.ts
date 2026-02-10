@@ -18,8 +18,19 @@ export interface ChainConfig {
 }
 
 export const MONAD_RPC_URLS = [
+  "https://rpc1.monad.xyz",
+  "https://monad.rpc.blxrbdn.com",
+  "https://rpc.monad.xyz",
+  "https://rpc-mainnet.monadinfra.com",
   "https://rpc3.monad.xyz",
-  "https://monad-testnet.drpc.org",
+  "https://monad-mainnet.drpc.org",
+  "https://monad-mainnet-rpc.spidernode.net",
+  "https://rpc.sentio.xyz/monad-mainnet",
+  "https://rpc4.monad.xyz",
+  "https://infra.originstake.com/monad/evm",
+  "https://rpc2.monad.xyz",
+  "https://monad-mainnet.api.onfinality.io/public",
+  "https://monad-mainnet.gateway.tatum.io",
 ];
 
 export const MONAD_SUBGRAPH_ID = "G3dQNfEnDw4q3bn6QRSJUmcLzi7JKTDGYGWwPeYWYa6X";
