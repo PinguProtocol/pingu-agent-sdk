@@ -13,6 +13,7 @@ import {
   createOrderTuple,
   getAssetAddress,
   getAssetDecimals,
+  getAssetMinSize,
   getAssetNameByAddress,
   getAssetDecimalsByAddress,
   isGasToken,
@@ -150,6 +151,14 @@ export class PinguTrader {
     const _margin = parseUnits(params.margin.toString(), assetDecimals);
     const _size = this.computeSize(_margin, params.leverage, maxLeverage);
 
+    // Validate minimum size (from AssetStore)
+    const minSize = getAssetMinSize(asset, this.client.config.assets);
+    if (_size.lt(minSize)) {
+      throw new Error(
+        `Order size ${_size.toString()} is below the minimum size ${minSize} for ${asset} (!min-size)`,
+      );
+    }
+
     const orderTuple = createOrderTuple({
       market: params.market,
       asset: assetAddress,
@@ -248,6 +257,14 @@ export class PinguTrader {
     const _margin = parseUnits(params.margin.toString(), assetDecimals);
     const _size = this.computeSize(_margin, params.leverage, maxLeverage);
     const _price = parseUnits(params.price.toString(), 18);
+
+    // Validate minimum size (from AssetStore)
+    const minSize = getAssetMinSize(asset, this.client.config.assets);
+    if (_size.lt(minSize)) {
+      throw new Error(
+        `Order size ${_size.toString()} is below the minimum size ${minSize} for ${asset} (!min-size)`,
+      );
+    }
 
     const orderTuple = createOrderTuple({
       market: params.market,

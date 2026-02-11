@@ -5,6 +5,7 @@ export interface AssetConfig {
   address: string;
   decimals: number;
   isGasToken?: boolean;
+  minSize: number;
 }
 
 export interface ChainConfig {
@@ -46,11 +47,13 @@ export const MONAD_CONFIG: ChainConfig = {
     USDC: {
       address: "0x754704bc059f8c67012fed69bc8a327a5aafb603",
       decimals: 6,
+      minSize: 100,
     },
     MON: {
       address: ADDRESS_ZERO,
       decimals: 18,
       isGasToken: true,
+      minSize: 5000,
     },
   },
 };

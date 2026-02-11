@@ -273,3 +273,20 @@ export function isGasToken(
   const asset = assets[assetName];
   return asset?.isGasToken === true;
 }
+
+/**
+ * Get the minimum position size (in raw token units) for an asset.
+ * This corresponds to `AssetStore.Asset.minSize` on-chain.
+ */
+export function getAssetMinSize(
+  assetName: string,
+  assets: Record<string, AssetConfig>,
+): number {
+  const asset = assets[assetName];
+  if (!asset) {
+    throw new Error(
+      `Unknown asset: ${assetName}. Available: ${Object.keys(assets).join(", ")}`,
+    );
+  }
+  return asset.minSize;
+}
